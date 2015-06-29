@@ -3972,6 +3972,12 @@ of command checkers is `flycheck-sanitize-errors'.
      `flycheck-parse-with-patterns'.  In this case,
      `:error-patterns' is mandatory.
 
+`:send-via-stdin ARG`
+     Send Buffer contents to the stdin of the process.
+
+     If ARG is non-nil, the Buffer's content will be sent to the
+     Checker's stdin.
+
 Note that you may not give `:start', `:interrupt', and
 `:print-doc' for a command checker.  You can give a custom
 `:verify' function, but you should take care to call
@@ -3993,7 +3999,8 @@ function."
         (patterns (plist-get properties :error-patterns))
         (parser (or (plist-get properties :error-parser)
                     #'flycheck-parse-with-patterns))
-        (predicate (plist-get properties :predicate)))
+        (predicate (plist-get properties :predicate))
+        (send-via-stdin (plist-get properties :send-via-stdin)))
 
     (unless command
       (error "Missing :command in syntax checker %s" symbol))
@@ -4032,7 +4039,8 @@ function."
       (pcase-dolist (`(,prop . ,value)
                      `((flycheck-command . ,command)
                        (flycheck-error-parser . ,parser)
-                       (flycheck-error-patterns . ,patterns)))
+                       (flycheck-error-patterns . ,patterns)
+                       (flycheck-send-via-stdin . ,send-via-stdin)))
         (put symbol prop value)))))
 
 (eval-and-compile
@@ -4288,6 +4296,8 @@ symbols in the command."
           ;; example for such a conflict.
           (setq process (apply 'start-process (format "flycheck-%s" checker)
                                nil program args))
+          ;; Send the buffer contents to process if needed
+          (flycheck-maybe-send-buffer-to-process checker process)
           (set-process-sentinel process 'flycheck-handle-signal)
           (set-process-filter process 'flycheck-receive-checker-output)
           (set-process-query-on-exit-flag process nil)
@@ -4316,6 +4326,23 @@ symbols in the command."
   ;; Deleting the process always triggers the sentinel, which does the cleanup
   (when process
     (delete-process process)))
+
+
+(defun flycheck-maybe-send-buffer-to-process (checker process)
+  "Maybe send the buffer contents to CHECKER's PROCESS.
+
+If 'flycheck-send-via-stdin is truthy for CHECKER,
+the current buffer's contents will be sent to the processe's Stdin"
+  (when (and process (get checker 'flycheck-send-via-stdin))
+    ;; Send buffer's contents to the stdin of the process
+    (process-send-string process
+     ;; buffer-string doesn't work nicely with narrowing.
+                         (save-restriction
+                           (widen)
+                           (buffer-string)))
+    ;; Send an eof to signify the end of input
+    (process-send-eof process)
+    ))
 
 (defun flycheck-command-checker-print-doc (checker)
   "Print additional documentation for a command CHECKER."
@@ -5006,6 +5033,7 @@ SYMBOL with `flycheck-def-executable-var'."
          ,@(when filter
              `(:error-filter #',filter))
          :modes ',(plist-get properties :modes)
+         :send-via-stdin ',(plist-get properties :send-via-stdin)
          ,@(when predicate
              `(:predicate #',predicate))
          :next-checkers ',(plist-get properties :next-checkers)))))
@@ -6373,10 +6401,8 @@ See URL `https://github.com/eslint/eslint'."
   :command ("eslint" "--format=checkstyle"
             (config-file "--config" flycheck-eslintrc)
             (option "--rulesdir" flycheck-eslint-rulesdir)
-            ;; We need to use source-inplace because eslint looks for
-            ;; configuration files in the directory of the file being checked.
-            ;; See https://github.com/flycheck/flycheck/issues/447
-            source-inplace)
+            "--stdin"
+            "--stdin-filename" source-original)
   :error-parser flycheck-parse-checkstyle
   :error-filter (lambda (errors)
                   (mapc (lambda (err)
@@ -6394,6 +6420,7 @@ See URL `https://github.com/eslint/eslint'."
                         (flycheck-sanitize-errors (flycheck-increment-error-columns errors)))
                   errors)
   :modes (js-mode js2-mode js3-mode)
+  :send-via-stdin t
   :next-checkers ((warning . javascript-jscs)))
 
 (flycheck-def-config-file-var flycheck-gjslintrc javascript-gjslint ".gjslintrc"
